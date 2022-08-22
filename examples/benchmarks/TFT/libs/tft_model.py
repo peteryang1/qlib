@@ -436,7 +436,7 @@ class TemporalFusionTransformer:
             print("# {} = {}".format(k, params[k]))
 
         # Build model
-        self.model = self.build_model()
+        self.model = self
 
     def get_tft_embeddings(self, all_inputs):
         """Transforms raw inputs to embeddings.
