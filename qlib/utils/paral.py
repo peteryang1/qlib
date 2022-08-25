@@ -8,6 +8,7 @@ from typing import Callable, Text, Union
 from joblib import Parallel, delayed
 from joblib._parallel_backends import MultiprocessingBackend
 import pandas as pd
+from qlib.log import get_module_logger
 
 from queue import Queue
 import concurrent
@@ -287,7 +288,7 @@ class call_in_subproc:
           We have to implement it via callable Class
     """
 
-    def __init__(self, func: Callable, qlib_config: QlibConfig = None):
+    def __init__(self, func: Callable, qlib_config: QlibConfig = None, try_times : int = 1):
         """
         Parameters
         ----------
@@ -297,12 +298,17 @@ class call_in_subproc:
         qlib_config : QlibConfig
             Qlib config for initialization in subprocess
 
+            
+        try_times : int
+            total attempts times to rerun the task when broken pipe exception occurs
+
         Returns
         -------
         Callable
         """
         self.func = func
         self.qlib_config = qlib_config
+        self.try_times = try_times
 
     def _func_mod(self, *args, **kwargs):
         """Modify the initial function by adding Qlib initialization"""
@@ -311,5 +317,15 @@ class call_in_subproc:
         return self.func(*args, **kwargs)
 
     def __call__(self, *args, **kwargs):
-        with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
-            return executor.submit(self._func_mod, *args, **kwargs).result()
+        local_try_times = self.try_times
+        while local_try_times > 0:
+            with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
+                try:
+                    return executor.submit(self._func_mod, *args, **kwargs).result()
+                except concurrent.futures.process.BrokenProcessPool as e:
+                    local_try_times -= 1
+                    if local_try_times > 0:
+                        get_module_logger("TrainerR").info(f"running models in sub process failed, will retry this task. Remaining times: {local_try_times}")
+                    else:
+                        get_module_logger("TrainerR").info(f"running models in sub process failed, retry time for this task is running out. Will exit with error")
+                        raise e

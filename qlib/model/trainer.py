@@ -224,6 +224,7 @@ class TrainerR(Trainer):
         experiment_name: Optional[str] = None,
         train_func: Callable = task_train,
         call_in_subproc: bool = False,
+        call_in_subproc_try_times: int = 1,
         default_rec_name: Optional[str] = None,
     ):
         """
@@ -233,12 +234,14 @@ class TrainerR(Trainer):
             experiment_name (str, optional): the default name of experiment.
             train_func (Callable, optional): default training method. Defaults to `task_train`.
             call_in_subproc (bool): call the process in subprocess to force memory release
+            call_in_subproc_try_times (int): number of times to retry subproc if broken pipe error occurs.
         """
         super().__init__()
         self.experiment_name = experiment_name
         self.default_rec_name = default_rec_name
         self.train_func = train_func
         self._call_in_subproc = call_in_subproc
+        self._call_in_subproc_try_times = call_in_subproc_try_times
 
     def train(self, tasks: list, train_func: Callable = None, experiment_name: str = None, **kwargs) -> List[Recorder]:
         """
@@ -265,7 +268,7 @@ class TrainerR(Trainer):
         for task in tqdm(tasks, desc="train tasks"):
             if self._call_in_subproc:
                 get_module_logger("TrainerR").info("running models in sub process (for forcing release memroy).")
-                train_func = call_in_subproc(train_func, C)
+                train_func = call_in_subproc(train_func, C, try_times = self._call_in_subproc_try_times)
             rec = train_func(task, experiment_name, recorder_name=self.default_rec_name, **kwargs)
             rec.set_tags(**{self.STATUS_KEY: self.STATUS_BEGIN})
             recs.append(rec)
