@@ -330,5 +330,5 @@ class call_in_subproc:
                         get_module_logger("TrainerR").info(f"running models in sub process failed, will retry this task. Remaining times: {local_try_times}")
                     else:
                         get_module_logger("TrainerR").info(psutil.virtual_memory())
-                        get_module_logger("TrainerR").info(f"running models in sub process failed, retry time for this task is running out. Will exit with error")
-                        raise e
+                        get_module_logger("TrainerR").warning(f"running models in sub process failed, retry time for this task is running out. Will exit with 0 to avoid too much time spent on finalizing the job.")
+                        # raise e # FIXME not raise error when error occured
