@@ -389,11 +389,14 @@ class TSDataSampler:
             data.columns, axis=1, inplace=True
         )  # data is useless since it's passed to a transposed one, hard code to free the memory of this dataframe to avoid three big dataframe in the memory(including: data, self.data, self.data_arr)
 
-        kwargs = {"object": self.data}
-        if dtype is not None:
-            kwargs["dtype"] = dtype
+        self.data_arr = self.data.to_numpy(copy=True, dtype=dtype)
+        self.data_index = deepcopy(self.data.index)
 
-        self.data_arr = np.array(**kwargs)  # Get index from numpy.array will much faster than DataFrame.values!
+        # the data type will be changed
+        # The index of usable data is between start_idx and end_idx
+        self.idx_df, self.idx_map = self.build_index(self.data)
+        del self.data  # save memory because np.append copies the whole data, so delete this dataframe before np.append
+
         # NOTE:
         # - append last line with full NaN for better performance in `__getitem__`
         # - Keep the same dtype will result in a better performance
@@ -404,10 +407,6 @@ class TSDataSampler:
         )
         self.nan_idx = -1  # The last line is all NaN
 
-        # the data type will be changed
-        # The index of usable data is between start_idx and end_idx
-        self.idx_df, self.idx_map = self.build_index(self.data)
-        self.data_index = deepcopy(self.data.index)
 
         if flt_data is not None:
             if isinstance(flt_data, pd.DataFrame):
@@ -426,7 +425,6 @@ class TSDataSampler:
         )
 
         self.idx_arr = np.array(self.idx_df.values, dtype=np.float64)  # for better performance
-        del self.data  # save memory
 
     @staticmethod
     def slice_idx_map_and_data_index(
