@@ -384,10 +384,25 @@ class TSDataSampler:
         self.step_len = step_len
         self.fillna_type = fillna_type
         assert get_level_index(data, "datetime") == 0
-        self.data = data.swaplevel().sort_index().copy()
+
+        # self.data = data.swaplevel().sort_index().copy() Important!!! This line uses more than twice memory, so use the following lines to make sure only twice the size of data memory is consumed:
+        ### Begin:
+        swaped_columns = deepcopy(data.columns)
+        index_argsort = deepcopy(data.index.swaplevel().argsort())
+        swaped_index = deepcopy(data.index.swaplevel()[index_argsort])
+        swaped_data_np_list = []
+        for col in swaped_columns:
+            swaped_data_np_list.append(data[col].to_numpy(copy=True)[index_argsort])
         data.drop(
             data.columns, axis=1, inplace=True
         )  # data is useless since it's passed to a transposed one, hard code to free the memory of this dataframe to avoid three big dataframe in the memory(including: data, self.data, self.data_arr)
+        for i in range(len(swaped_data_np_list)):
+            swaped_data_np_list[i] = swaped_data_np_list[i].reshape((swaped_data_np_list[i].shape[0], 1))
+        swaped_data_np = np.concatenate(swaped_data_np_list, axis=1)
+        del swaped_data_np_list
+        self.data = pd.DataFrame(swaped_data_np, index=swaped_index, columns=swaped_columns)
+        del swaped_data_np
+        ### End
 
         self.data_arr = self.data.to_numpy(copy=True, dtype=dtype)
         self.data_index = deepcopy(self.data.index)
