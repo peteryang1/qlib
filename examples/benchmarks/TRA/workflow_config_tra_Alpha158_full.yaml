@@ -39,7 +39,7 @@ tra_config: &tra_config
   src_info: LR_TPE
 
 model_config: &model_config
-  input_size: 158
+  input_size: 360
   hidden_size: 256
   num_layers: 2
   rnn_arch: LSTM
@@ -76,7 +76,7 @@ task:
       tra_config: *tra_config
       model_config: *model_config
       model_type: RNN
-      lr: 1e-3
+      lr: 0.001
       n_epochs: 100
       max_steps_per_epoch:
       early_stop: 20
@@ -89,7 +89,7 @@ task:
       memory_mode: *memory_mode
       eval_train: False
       eval_test: True
-      pretrain: True
+      pretrain: False
       init_state:
       freeze_model: False
       freeze_predictors: False
@@ -106,7 +106,7 @@ task:
         valid: [2015-01-01, 2016-12-31]
         test: [2017-01-01, 2020-08-01]
       seq_len: 60
-      horizon: 2
+      horizon: 22
       input_size:
       num_states: *num_states
       batch_size: 1024

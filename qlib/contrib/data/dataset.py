@@ -128,9 +128,13 @@ class MTSDatasetH(DatasetH):
         shuffle=True,
         drop_last=False,
         input_size=None,
+        label_idx=-1,
+        label_fillna=True,
+        batch_divide=None,
         **kwargs,
     ):
-
+        self.label_idx = label_idx
+        self.label_fillna = label_fillna
         assert num_states == 0 or horizon > 0, "please specify `horizon` to avoid data leakage"
         assert memory_mode in ["sample", "daily"], "unsupported memory mode"
         assert memory_mode == "sample" or batch_size < 0, "daily memory requires daily sampling (`batch_size < 0`)"
@@ -149,6 +153,11 @@ class MTSDatasetH(DatasetH):
         self.drop_last = drop_last
         self.input_size = input_size
         self.params = (batch_size, n_samples, drop_last, shuffle)  # for train/eval switch
+        self.batch_divide = batch_divide
+
+        handler = "file:///tmp/data/amc_align_data/our_align_data.lm.V06.F.csi800.renorm.pickle/"
+        from mini_project.data.handler import load_handler
+        handler = load_handler(handler)
 
         super().__init__(handler, segments, **kwargs)
 
@@ -173,7 +182,8 @@ class MTSDatasetH(DatasetH):
         # convert to numpy
         self._data = df["feature"].values.astype("float32")
         np.nan_to_num(self._data, copy=False)  # NOTE: fillna in case users forget using the fillna processor
-        self._label = df["label"].squeeze().values.astype("float32")
+        # self._label = df["label"].squeeze().values.astype("float32")
+        self._label = df.iloc(axis=1)[self.label_idx - 5].squeeze().values.astype("float32")
         self._index = df.index
 
         if self.input_size is not None and self.input_size != self._data.shape[1]:
@@ -224,6 +234,11 @@ class MTSDatasetH(DatasetH):
         mask = (self._daily_index.values >= start_date) & (self._daily_index.values <= end_date)
         obj._daily_slices = self._daily_slices[mask]
         obj._daily_index = self._daily_index[mask]
+
+        if obj.batch_divide is not None:
+            obj.batch_size = obj._batch_slices.shape[0] // obj.batch_divide
+            obj.params = (obj._batch_slices.shape[0] // obj.batch_divide, obj.params[1], obj.params[2], obj.params[3])
+
         return obj
 
     def restore_index(self, index):
@@ -338,7 +353,8 @@ class MTSDatasetH(DatasetH):
                 # end indices batch loop
 
             # concate
-            data = _to_tensor(np.stack(data))
+            data = _to_tensor(np.stack(data)[:,-1,:])
+            # data = _to_tensor(np.stack(data))
             state = _to_tensor(np.stack(state))
             label = _to_tensor(np.stack(label))
             index = np.array(index)

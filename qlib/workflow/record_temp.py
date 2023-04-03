@@ -203,7 +203,7 @@ class SignalRecord(RecordTemp):
             self.save(**{"label.pkl": raw_label})
 
     def list(self):
-        return ["pred.pkl", "label.pkl"]
+        return []
 
 
 class ACRecordTemp(RecordTemp):

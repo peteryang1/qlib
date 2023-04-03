@@ -14,6 +14,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+from sklearn.linear_model import Ridge
+from qlib.workflow import R
 
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -127,13 +129,15 @@ class TRAModel(Model):
 
         self._writer = None
         if self.logdir is not None:
-            if os.path.exists(self.logdir):
-                self.logger.warning(f"logdir {self.logdir} is not empty")
-            os.makedirs(self.logdir, exist_ok=True)
+
+            datetime_host = f'{__import__("socket").gethostname()}_{__import__("datetime").datetime.now().strftime("%m-%d-%Y_%H-%M-%S")}'
+            # The comment does not need now.
+            self.logdir = f"{self.logdir}/{datetime_host}"
             if SummaryWriter is not None:
                 self._writer = SummaryWriter(log_dir=self.logdir)
 
         self._init_model()
+        self.Ridge_model = Ridge(alpha=1, fit_intercept=True, copy_X=False)
 
     def _init_model(self):
 
@@ -174,6 +178,40 @@ class TRAModel(Model):
 
         self.fitted = False
         self.global_step = -1
+    
+    def infer_linear_weight_epoch(self, data_set):
+        self.model.eval()
+        self.tra.eval()
+        data_set.train()
+        
+        batch_X = [[] for _ in range(self.tra_config["num_states"])]
+        batch_y = [[] for _ in range(self.tra_config["num_states"])]
+        for batch in tqdm(data_set):
+
+            data, state, label, count = batch["data"], batch["state"], batch["label"], batch["daily_count"]
+
+            with torch.set_grad_enabled(not self.freeze_model):
+                hidden = self.model(data)
+
+            all_preds, choice, prob = self.tra(hidden, state)
+
+            for state_index in range(choice.shape[-1]):
+                X = np.nan_to_num(hidden[prob.argmax(dim=-1) == state_index].cpu().numpy())
+                y = np.nan_to_num(label[prob.argmax(dim=-1) == state_index].cpu().numpy())
+                batch_X[state_index].append(X)
+                batch_y[state_index].append(y)
+            
+        weights = []
+        biases = []
+        for state_index in range(choice.shape[-1]):
+            X = np.concatenate(batch_X[state_index], axis=0)
+            y = np.concatenate(batch_y[state_index], axis=0)
+            if X.shape[0] != 0:
+                self.Ridge_model.fit(X, y)
+            weights.append(self.Ridge_model.coef_)
+            biases.append(float(self.Ridge_model.intercept_))
+        self.tra.predictors.weight.data = torch.from_numpy(np.array(weights, dtype=np.float32)).to(device)
+        self.tra.predictors.bias.data = torch.from_numpy(np.array(biases, dtype=np.float32)).to(device)
 
     def train_epoch(self, epoch, data_set, is_pretrain=False):
 
@@ -210,6 +248,30 @@ class TRAModel(Model):
 
             all_preds, choice, prob = self.tra(hidden, state)
 
+            if choice is None:
+                all_preds = all_preds.detach()
+                all_preds.requires_grad_()
+                X = np.nan_to_num(data.cpu().numpy())
+                y = np.nan_to_num(label.cpu().numpy())
+                self.Ridge_model.fit(X, y)
+                self.tra.predictors.weight.data = torch.from_numpy(self.Ridge_model.coef_).to(device).view((1,-1))
+                self.tra.predictors.bias.data[0] = float(self.Ridge_model.intercept_)
+            else:
+                weights = []
+                biases = []
+                for state_index in range(choice.shape[-1]):
+                    X = np.nan_to_num(data[prob.argmax(dim=-1) == state_index].cpu().numpy())
+                    y = np.nan_to_num(label[prob.argmax(dim=-1) == state_index].cpu().numpy())
+                    if X.shape[0] != 0:
+                        self.Ridge_model.fit(X, y)
+                    weights.append(self.Ridge_model.coef_)
+                    biases.append(float(self.Ridge_model.intercept_))
+                self.tra.predictors.weight.data = torch.from_numpy(np.array(weights, dtype=np.float32)).to(device)
+                self.tra.predictors.bias.data = torch.from_numpy(np.array(biases, dtype=np.float32)).to(device)
+                all_preds = self.tra.predictors(hidden)
+                all_preds = all_preds.detach()
+                all_preds.requires_grad_()
+
             if is_pretrain or self.transport_method != "none":
                 # NOTE: use oracle transport for pre-training
                 loss, pred, L, P = self.transport_fn(
@@ -231,13 +293,21 @@ class TRAModel(Model):
                 decay = self.rho ** (self.global_step // 100)  # decay every 100 steps
                 lamb = 0 if is_pretrain else self.lamb * decay
                 reg = prob.log().mul(P).sum(dim=1).mean()  # train router to predict TO assignment
-                if self._writer is not None and not is_pretrain:
+                if self._writer is not None and not is_pretrain and self.global_step % 10 == 0:
                     self._writer.add_scalar("training/router_loss", -reg.item(), self.global_step)
+                    R.log_metrics(training_router_loss=-reg.item(), step=self.global_step)
+
                     self._writer.add_scalar("training/reg_loss", loss.item(), self.global_step)
+                    R.log_metrics(training_reg_loss=loss.item(), step=self.global_step)
+
                     self._writer.add_scalar("training/lamb", lamb, self.global_step)
+                    R.log_metrics(training_lamb=lamb, step=self.global_step)
+
                     if not self.use_daily_transport:
                         P_mean = P.mean(axis=0).detach()
                         self._writer.add_scalar("training/P", P_mean.max() / P_mean.min(), self.global_step)
+                        R.log_metrics(training_P=P_mean.max() / P_mean.min(), step=self.global_step)
+
                 loss = loss - lamb * reg
             else:
                 pred = all_preds.mean(dim=1)
@@ -248,8 +318,10 @@ class TRAModel(Model):
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
-            if self._writer is not None and not is_pretrain:
+            if self._writer is not None and not is_pretrain and self.global_step % 10 == 0:
                 self._writer.add_scalar("training/total_loss", loss.item(), self.global_step)
+                R.log_metrics(total_loss=loss.item(), step=self.global_step)
+                self._writer.flush()
 
             total_loss += loss.item()
             total_count += 1
@@ -265,11 +337,14 @@ class TRAModel(Model):
                 self._writer.add_image("P", plot(P_all), epoch, dataformats="HWC")
                 self._writer.add_image("prob", plot(prob_all), epoch, dataformats="HWC")
                 self._writer.add_image("choice", plot(choice_all), epoch, dataformats="HWC")
+                self._writer.flush()
 
         total_loss /= total_count
 
-        if self._writer is not None and not is_pretrain:
+        if self._writer is not None and not is_pretrain and self.global_step % 10 == 0:
             self._writer.add_scalar("training/loss", total_loss, epoch)
+            R.log_metrics(training_loss=total_loss, step=self.global_step)
+            self._writer.flush()
 
         return total_loss
 
@@ -332,6 +407,7 @@ class TRAModel(Model):
         if self._writer is not None and epoch >= 0 and not is_pretrain:
             for key, value in metrics.items():
                 self._writer.add_scalar(prefix + "/" + key, value, epoch)
+                R.log_metrics(**{prefix + "_" + key: value, "step": epoch})
 
         if return_pred:
             preds = pd.concat(preds, axis=0)
@@ -415,6 +491,8 @@ class TRAModel(Model):
         self.logger.info("best score: %.6lf @ %d" % (best_score, best_epoch))
         self.model.load_state_dict(best_params["model"])
         self.tra.load_state_dict(best_params["tra"])
+        if self.tra.num_states != 1:
+            self.infer_linear_weight_epoch(train_set)
 
         return best_score
 
@@ -463,16 +541,26 @@ class TRAModel(Model):
 
             torch.save({"model": self.model.state_dict(), "tra": self.tra.state_dict()}, self.logdir + "/model.bin")
 
+            
+            R.save_objects(train_preds=train_preds)
+            R.save_objects(valid_preds=valid_preds)
+            R.save_objects(test_preds=test_preds)
             train_preds.to_pickle(self.logdir + "/train_pred.pkl")
             valid_preds.to_pickle(self.logdir + "/valid_pred.pkl")
             test_preds.to_pickle(self.logdir + "/test_pred.pkl")
 
             if len(train_probs):
+                R.save_objects(train_probs=train_probs)
+                R.save_objects(valid_probs=valid_probs)
+                R.save_objects(test_probs=test_probs)
                 train_probs.to_pickle(self.logdir + "/train_prob.pkl")
                 valid_probs.to_pickle(self.logdir + "/valid_prob.pkl")
                 test_probs.to_pickle(self.logdir + "/test_prob.pkl")
 
             if len(train_P):
+                R.save_objects(train_P=train_P)
+                R.save_objects(valid_P=valid_P)
+                R.save_objects(test_P=test_P)
                 train_P.to_pickle(self.logdir + "/train_P.pkl")
                 valid_P.to_pickle(self.logdir + "/valid_P.pkl")
                 test_P.to_pickle(self.logdir + "/test_P.pkl")
@@ -549,28 +637,30 @@ class RNN(nn.Module):
         self.rnn_arch = rnn_arch
         self.use_attn = use_attn
 
-        if hidden_size < input_size:
-            # compression
-            self.input_proj = nn.Linear(input_size, hidden_size)
-        else:
-            self.input_proj = None
+        # if hidden_size < input_size:
+        #     # compression
+        #     self.input_proj = nn.Linear(input_size, hidden_size)
+        # else:
+        #     self.input_proj = None
 
-        self.rnn = getattr(nn, rnn_arch)(
-            input_size=min(input_size, hidden_size),
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout,
-        )
+        # self.rnn = getattr(nn, rnn_arch)(
+        #     input_size=min(input_size, hidden_size),
+        #     hidden_size=hidden_size,
+        #     num_layers=num_layers,
+        #     batch_first=True,
+        #     dropout=dropout,
+        # )
 
-        if self.use_attn:
-            self.W = nn.Linear(hidden_size, hidden_size)
-            self.u = nn.Linear(hidden_size, 1, bias=False)
-            self.output_size = hidden_size * 2
-        else:
-            self.output_size = hidden_size
+        # if self.use_attn:
+        #     self.W = nn.Linear(hidden_size, hidden_size)
+        #     self.u = nn.Linear(hidden_size, 1, bias=False)
+        #     self.output_size = hidden_size * 2
+        # else:
+        #     self.output_size = hidden_size
+        self.output_size = hidden_size
 
     def forward(self, x):
+        return x
 
         if self.input_proj is not None:
             x = self.input_proj(x)
