@@ -402,6 +402,7 @@ class TRAModel(Model):
             "MAE": metrics.MAE.mean(),
             "IC": metrics.IC.mean(),
             "ICIR": metrics.IC.mean() / metrics.IC.std(),
+            "INTERPREDIC": metrics.INTERPREDIC.mean(),
         }
 
         if self._writer is not None and epoch >= 0 and not is_pretrain:
@@ -828,6 +829,11 @@ class TRA(nn.Module):
 
 
 def evaluate(pred):
+    inter_pred_ic = []
+    for i in range(2, len(pred.columns)):
+        for j in range(i+1, len(pred.columns)):
+            inter_pred_ic.append(pred.iloc[:, i].corr(pred.iloc[:, j]))
+    inter_pred_ic = sum(inter_pred_ic) / len(inter_pred_ic)
     pred = pred.rank(pct=True)  # transform into percentiles
     score = pred.score
     label = pred.label
@@ -835,7 +841,8 @@ def evaluate(pred):
     MSE = (diff**2).mean()
     MAE = (diff.abs()).mean()
     IC = score.corr(label, method="spearman")
-    return {"MSE": MSE, "MAE": MAE, "IC": IC}
+
+    return {"MSE": MSE, "MAE": MAE, "IC": IC, "INTERPREDIC": inter_pred_ic}
 
 
 def shoot_infs(inp_tensor):
